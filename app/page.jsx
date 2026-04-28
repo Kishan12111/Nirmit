@@ -4,7 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 const MAX_ROUTE_POINTS = 180;
 const MAX_DEPTH_POINTS = 180;
-const MIN_ROUTE_MOVE_METERS = 2;
+const MIN_ROUTE_MOVE_METERS = 0.5;
+const MIN_TUNNEL_TILT_DEG = 2.5;
+const FALLBACK_STEP_METERS = 0.4;
 const TELEMETRY_INTERVAL_MS = 300;
 const DEPTH_LIMIT = 100;
 const DEFAULT_IP = "192.168.1.45";
@@ -314,6 +316,8 @@ function MapPanel({ telemetry, routePoints, routeDistance, routeStatus, onResetR
 function TunnelPanel({ telemetry, routePoints, depthTrail, depthDistance, onResetTunnel, onCalibrate }) {
   const latest = depthTrail.at(-1) || { distance: 0, depth: 0, north: 0, east: 0 };
   const positionText = `${latest.north >= 0 ? `N ${Math.abs(latest.north).toFixed(1)} m` : `S ${Math.abs(latest.north).toFixed(1)} m`}, ${latest.east >= 0 ? `E ${Math.abs(latest.east).toFixed(1)} m` : `W ${Math.abs(latest.east).toFixed(1)} m`}`;
+  const startPoint = routePoints[0];
+  const endPoint = routePoints.at(-1);
   const startDepth = depthTrail[0] || latest;
   const minDepth = depthTrail.reduce((min, point) => Math.min(min, point.depth), 0);
   const maxDepth = depthTrail.reduce((max, point) => Math.max(max, point.depth), 0);
@@ -453,6 +457,16 @@ function TunnelPanel({ telemetry, routePoints, depthTrail, depthDistance, onRese
           <div className="info-card glowing-card">
             <span>Total distance</span>
             <strong>{depthDistance >= 1000 ? `${(depthDistance / 1000).toFixed(2)} km` : `${depthDistance.toFixed(1)} m`}</strong>
+          </div>
+
+          <div className="info-card glowing-card">
+            <span>Start point</span>
+            <strong>{startPoint ? formatPoint(startPoint[0], startPoint[1]) : "Waiting for GPS"}</strong>
+          </div>
+
+          <div className="info-card glowing-card">
+            <span>End point</span>
+            <strong>{endPoint ? formatPoint(endPoint[0], endPoint[1]) : "Waiting for GPS"}</strong>
           </div>
 
           <div className="info-card glowing-card">
@@ -603,19 +617,27 @@ export default function HomePage() {
           const lastPoint = currentRoute.at(-1);
           const movedEnough = !lastPoint || distanceMeters(lastPoint, point) >= MIN_ROUTE_MOVE_METERS;
 
-          if (movedEnough) {
+          if (movedEnough || currentRoute.length === 0) {
             const nextRoute = [...currentRoute, point].slice(-MAX_ROUTE_POINTS);
             routePointsRef.current = nextRoute;
             setRoutePoints(nextRoute);
+          }
 
-            const currentTrail = depthTrailRef.current;
-            const lastTrailPoint = currentTrail.at(-1) || { distance: 0, depth: 0, north: 0, east: 0 };
-            const stepMeters = lastPoint ? distanceMeters(lastPoint, point) : 0;
-            const betaOffset = normalized.beta - calibrationRef.current.beta;
-            const tiltRatio = clamp(betaOffset / 90, -1, 1);
-            const depthDelta = stepMeters * tiltRatio * 1.8;
-            const relative = latLngToOffsetMeters(nextRoute[0], point);
+          const currentTrail = depthTrailRef.current;
+          const lastTrailPoint = currentTrail.at(-1) || { distance: 0, depth: 0, north: 0, east: 0 };
+          let stepMeters = lastPoint ? distanceMeters(lastPoint, point) : 0;
+          const betaOffset = normalized.beta - calibrationRef.current.beta;
+          const tiltRatio = clamp(betaOffset / 90, -1, 1);
+          const tiltActive = Math.abs(betaOffset) >= MIN_TUNNEL_TILT_DEG;
 
+          if (stepMeters < MIN_ROUTE_MOVE_METERS && tiltActive) {
+            stepMeters = FALLBACK_STEP_METERS;
+          }
+
+          const depthDelta = stepMeters * tiltRatio * 1.8;
+          const relative = latLngToOffsetMeters((routePointsRef.current[0] || point), point);
+
+          if (stepMeters > 0 || tiltActive) {
             const nextTrail = [
               ...currentTrail,
               {
