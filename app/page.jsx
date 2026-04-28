@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 const MAX_ROUTE_POINTS = 180;
 const MAX_DEPTH_POINTS = 180;
 const MIN_ROUTE_MOVE_METERS = 2;
-const TELEMETRY_INTERVAL_MS = 1000;
+const TELEMETRY_INTERVAL_MS = 300;
 const DEPTH_LIMIT = 100;
 const DEFAULT_IP = "192.168.1.45";
 
@@ -26,7 +26,7 @@ const initialTelemetry = {
 };
 
 const gaugeRanges = {
-  gas: { max: 450, warning: 220, danger: 300, unit: "ppm" },
+  gas: { max: 1200, warning: 900, danger: 1100, unit: "ppm" },
   temperature: { max: 60, warning: 38, danger: 42, unit: "°C" },
   humidity: { max: 100, warning: 70, danger: 90, unit: "%" },
   heartRate: { max: 150, warning: 105, danger: 120, unit: "bpm" }
@@ -34,6 +34,12 @@ const gaugeRanges = {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeGas(rawValue) {
+  if (!Number.isFinite(rawValue)) return 0;
+  // If the sender reports a 0-4000 range, scale it down (e.g. 2500 -> 500).
+  return rawValue > 1500 ? Math.round(rawValue * 0.2) : Math.round(rawValue);
 }
 
 function distanceMeters(a, b) {
@@ -154,6 +160,7 @@ function MapPanel({ telemetry, routePoints, routeDistance, routeStatus, onResetR
   const mapRef = useRef(null);
   const containerRef = useRef(null);
   const markersRef = useRef({ map: null, start: null, current: null, sos: null, route: null });
+  const resizeObserverRef = useRef(null);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.L || !containerRef.current || mapRef.current) {
@@ -185,7 +192,15 @@ function MapPanel({ telemetry, routePoints, routeDistance, routeStatus, onResetR
       }).addTo(map)
     };
 
+    // ensure leaflet calculates sizes correctly when mounted
     mapRef.current = map;
+    setTimeout(() => map.invalidateSize(), 250);
+
+    // invalidate on container resize
+    if (window.ResizeObserver) {
+      resizeObserverRef.current = new ResizeObserver(() => map.invalidateSize());
+      resizeObserverRef.current.observe(containerRef.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -239,6 +254,8 @@ function MapPanel({ telemetry, routePoints, routeDistance, routeStatus, onResetR
     } else {
       map.setView(currentPoint, map.getZoom(), { animate: true });
     }
+    // sometimes leaflet needs a nudge when container is visible
+    setTimeout(() => map.invalidateSize(), 120);
   }, [telemetry.lat, telemetry.lng, telemetry.sos, routePoints]);
 
   return (
@@ -250,6 +267,19 @@ function MapPanel({ telemetry, routePoints, routeDistance, routeStatus, onResetR
         </div>
         <div className="chip-row">
           <span className="chip">{routeStatus}</span>
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => {
+              const map = mapRef.current;
+              if (map && telemetry.lat !== null && telemetry.lng !== null) {
+                map.setView([telemetry.lat, telemetry.lng], 17, { animate: true });
+              }
+            }}
+            title="Center on user"
+          >
+            Center
+          </button>
           <button className="ghost-button" type="button" onClick={onResetRoute}>
             Reset route
           </button>
@@ -258,39 +288,24 @@ function MapPanel({ telemetry, routePoints, routeDistance, routeStatus, onResetR
 
       <div className="map-grid">
         <div className="map-frame" ref={containerRef} />
-        <aside className="stats-stack">
-          <div className="info-card start-card">
-            <span>Start point</span>
+        <div className="map-meta">
+          <div>
+            <span>Start</span>
             <strong>{routePoints[0] ? formatPoint(routePoints[0][0], routePoints[0][1]) : "Waiting for GPS"}</strong>
           </div>
-
-          <div className="info-card current-card">
-            <span>Current point</span>
+          <div>
+            <span>Current</span>
             <strong>{telemetry.lat !== null && telemetry.lng !== null ? formatPoint(telemetry.lat, telemetry.lng) : "Waiting for GPS"}</strong>
           </div>
-
-          <div className="stats-grid compact">
-            <div>
-              <span>Total distance</span>
-              <strong>{routeDistance >= 1000 ? `${(routeDistance / 1000).toFixed(2)} km` : `${routeDistance.toFixed(0)} m`}</strong>
-            </div>
-            <div>
-              <span>Route points</span>
-              <strong>{routePoints.length}</strong>
-            </div>
+          <div>
+            <span>Distance</span>
+            <strong>{routeDistance >= 1000 ? `${(routeDistance / 1000).toFixed(2)} km` : `${routeDistance.toFixed(0)} m`}</strong>
           </div>
-
-          <div className="stats-grid compact">
-            <div>
-              <span>Return to start</span>
-              <strong>{routePoints.length > 1 && routePoints[0] && routePoints.at(-1) && distanceMeters(routePoints[0], routePoints.at(-1)) < 10 ? "Yes" : "No"}</strong>
-            </div>
-            <div>
-              <span>SOS state</span>
-              <strong>{telemetry.sos ? "Active" : "Clear"}</strong>
-            </div>
+          <div>
+            <span>SOS</span>
+            <strong>{telemetry.sos ? "Active" : "Clear"}</strong>
           </div>
-        </aside>
+        </div>
       </div>
     </article>
   );
@@ -452,16 +467,20 @@ function TunnelPanel({ telemetry, routePoints, depthTrail, depthDistance, onRese
 
           <div className="history-card">
             <div className="history-title">Direction steps</div>
-            <ol>
-              {depthTrail.slice(-6).reverse().map((point, index) => (
-                <li key={`${point.distance}-${point.depth}-${index}`}>
-                  <span>{index === 0 ? "Latest" : `Step -${index}`}</span>
-                  <strong>
-                    {point.north >= 0 ? "North" : "South"} {Math.abs(point.north).toFixed(1)} m, {point.east >= 0 ? "East" : "West"} {Math.abs(point.east).toFixed(1)} m
-                  </strong>
-                </li>
-              ))}
-            </ol>
+            <div className="history-metrics">
+              <div>
+                <span>North/South</span>
+                <strong>{latest.north >= 0 ? "North" : "South"} {Math.abs(latest.north).toFixed(1)} m</strong>
+              </div>
+              <div>
+                <span>East/West</span>
+                <strong>{latest.east >= 0 ? "East" : "West"} {Math.abs(latest.east).toFixed(1)} m</strong>
+              </div>
+              <div>
+                <span>Steps tracked</span>
+                <strong>{depthTrail.length}</strong>
+              </div>
+            </div>
           </div>
         </aside>
       </div>
@@ -476,14 +495,16 @@ export default function HomePage() {
   const [depthTrail, setDepthTrail] = useState([{ distance: 0, depth: 0, north: 0, east: 0 }]);
   const [receiverStatus, setReceiverStatus] = useState("Waiting for receiver...");
   const [statusTone, setStatusTone] = useState("idle");
+  const [lightTheme, setLightTheme] = useState(() => !!(typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('helmet-light-theme') === '1'));
+  const [sosCountdown, setSosCountdown] = useState(null);
+  const [isCalling, setIsCalling] = useState(false);
+  const [sosActive, setSosActive] = useState(false);
+  const [callHold, setCallHold] = useState(false);
+  const emergencyContact = { name: "Emergency Contact", number: "+91 98765 43210" };
 
   const routePointsRef = useRef([]);
   const depthTrailRef = useRef([{ distance: 0, depth: 0, north: 0, east: 0 }]);
   const calibrationRef = useRef({ beta: 0, gamma: 0, motion: 9.81 });
-  const currentMarkerRef = useRef(null);
-  const sosMarkerRef = useRef(null);
-  const mapObjectsRef = useRef({ map: null, start: null, route: null });
-  const mapContainerRef = useRef(null);
   const latestTelemetryRef = useRef(initialTelemetry);
 
   useEffect(() => {
@@ -491,7 +512,22 @@ export default function HomePage() {
     if (savedIp) {
       setEspIp(savedIp);
     }
+    // apply theme class early
+    if (typeof document !== 'undefined') {
+      if (lightTheme) document.documentElement.classList.add('light-theme');
+      else document.documentElement.classList.remove('light-theme');
+    }
   }, []);
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      if (lightTheme) document.documentElement.classList.add('light-theme');
+      else document.documentElement.classList.remove('light-theme');
+    }
+    try {
+      localStorage.setItem('helmet-light-theme', lightTheme ? '1' : '0');
+    } catch (e) {}
+  }, [lightTheme]);
 
   useEffect(() => {
     latestTelemetryRef.current = telemetry;
@@ -499,99 +535,33 @@ export default function HomePage() {
   }, [telemetry]);
 
   useEffect(() => {
-    if (!window.L || !mapContainerRef.current || mapObjectsRef.current.map) {
-      return;
+    if (telemetry.sos) {
+      if (!sosActive && sosCountdown === null && !isCalling && !callHold) {
+        setSosActive(true);
+        setSosCountdown(10);
+      }
+    } else if (!callHold && !isCalling) {
+      setSosActive(false);
+      setSosCountdown(null);
     }
-
-    const L = window.L;
-    const map = L.map(mapContainerRef.current, {
-      zoomControl: true,
-      scrollWheelZoom: false
-    }).setView([12.9716, 77.5946], 17);
-
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 20,
-      attribution: "&copy; OpenStreetMap"
-    }).addTo(map);
-
-    mapObjectsRef.current = {
-      map,
-      start: null,
-      route: L.polyline([], {
-        color: "#67e8f9",
-        weight: 5,
-        opacity: 0.85,
-        lineJoin: "round",
-        lineCap: "round"
-      }).addTo(map)
-    };
-  }, []);
+  }, [telemetry.sos, sosActive, sosCountdown, isCalling, callHold]);
 
   useEffect(() => {
-    const map = mapObjectsRef.current.map;
-    const L = window.L;
-
-    if (!map || !L || telemetry.lat === null || telemetry.lng === null) {
+    if (sosCountdown === null) return;
+    if (sosCountdown <= 0) {
+      setSosCountdown(null);
+      setIsCalling(true);
+      setCallHold(true);
       return;
     }
 
-    const currentPoint = [telemetry.lat, telemetry.lng];
-    const route = routePointsRef.current;
-    const firstPoint = route[0] || currentPoint;
+    const timer = window.setTimeout(() => {
+      setSosCountdown((prev) => (prev === null ? null : prev - 1));
+    }, 1000);
 
-    const personIcon = L.divIcon({
-      className: "map-marker person-marker",
-      html: "<div class='person-dot'></div>",
-      iconSize: [44, 44],
-      iconAnchor: [22, 22]
-    });
+    return () => window.clearTimeout(timer);
+  }, [sosCountdown]);
 
-    const startIcon = L.divIcon({
-      className: "map-marker start-marker",
-      html: "<div class='start-dot'>S</div>",
-      iconSize: [34, 34],
-      iconAnchor: [17, 17]
-    });
-
-    const sosIcon = L.divIcon({
-      className: "map-marker sos-marker",
-      html: "<div class='sos-dot'>SOS</div>",
-      iconSize: [56, 56],
-      iconAnchor: [28, 28]
-    });
-
-    if (!mapObjectsRef.current.start) {
-      mapObjectsRef.current.start = L.marker(firstPoint, { icon: startIcon }).addTo(map);
-    } else {
-      mapObjectsRef.current.start.setLatLng(firstPoint);
-    }
-
-    if (!currentMarkerRef.current) {
-      currentMarkerRef.current = L.marker(currentPoint, { icon: personIcon }).addTo(map);
-    } else {
-      currentMarkerRef.current.setLatLng(currentPoint);
-    }
-
-    if (telemetry.sos) {
-      if (!sosMarkerRef.current) {
-        sosMarkerRef.current = L.marker(currentPoint, { icon: sosIcon }).addTo(map);
-      } else {
-        sosMarkerRef.current.setLatLng(currentPoint);
-      }
-    } else if (sosMarkerRef.current) {
-      map.removeLayer(sosMarkerRef.current);
-      sosMarkerRef.current = null;
-    }
-
-    mapObjectsRef.current.route?.setLatLngs(route);
-
-    if (route.length > 1) {
-      map.panTo(currentPoint, {
-        animate: true,
-        duration: 0.6
-      });
-    }
-  }, [telemetry.lat, telemetry.lng, telemetry.sos, routePoints]);
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
@@ -607,8 +577,9 @@ export default function HomePage() {
         }
 
         const payload = await response.json();
+        const rawGas = Number(payload.gasPpm ?? 0);
         const normalized = {
-          gasPpm: Number(payload.gasPpm ?? 0),
+          gasPpm: normalizeGas(rawGas),
           temperatureC: Number(payload.temperatureC ?? 0),
           humidityPct: Number(payload.humidityPct ?? 0),
           heartRate: Number(payload.heartRate ?? 72),
@@ -714,15 +685,23 @@ export default function HomePage() {
       <div className="page-shell">
         <header className="hero-shell glass-card">
           <div>
-            <p className="eyebrow">Smart Helmet Network</p>
-            <h1>Receiver dashboard with GPS route and tunnel depth view</h1>
-            <p className="hero-copy">
-              Live readings from the receiver ESP32: gas, temperature, humidity, heart rate, GPS, gyro, motion, and SOS.
-            </p>
+            <p className="eyebrow">Smart Helmet</p>
+            <h1>Live Safety Dashboard</h1>
+            <p className="hero-copy">Gas, vitals, GPS, and tunnel profile.</p>
           </div>
 
           <div className="hero-actions">
             <div className="status-badge">{receiverStatus}</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => setLightTheme((s) => !s)}
+                title="Toggle light theme"
+              >
+                {lightTheme ? 'Dark' : 'Light'}
+              </button>
+            </div>
             <label className="ip-field">
               <span>Receiver ESP32 IP</span>
               <div className="input-row">
@@ -747,31 +726,23 @@ export default function HomePage() {
           <GaugeCard title="Heart Rate" value={telemetry.heartRate} unit={gaugeRanges.heartRate.unit} range={gaugeRanges.heartRate} gradientId="heartGradient" />
         </section>
 
-        <section className="stats-row">
-          <article className="glass-card stat-card">
-            <span>Latitude</span>
-            <strong>{telemetry.lat === null ? "--" : telemetry.lat.toFixed(6)}</strong>
-          </article>
-          <article className="glass-card stat-card">
-            <span>Longitude</span>
-            <strong>{telemetry.lng === null ? "--" : telemetry.lng.toFixed(6)}</strong>
-          </article>
-          <article className="glass-card stat-card">
+        <section className="mini-metrics">
+          <div className="mini-card">
             <span>Gyro Alpha</span>
-            <strong>{telemetry.alpha.toFixed(1)} deg</strong>
-          </article>
-          <article className="glass-card stat-card">
+            <strong>{telemetry.alpha.toFixed(1)}°</strong>
+          </div>
+          <div className="mini-card">
             <span>Gyro Beta</span>
-            <strong>{telemetry.beta.toFixed(1)} deg</strong>
-          </article>
-          <article className="glass-card stat-card">
+            <strong>{telemetry.beta.toFixed(1)}°</strong>
+          </div>
+          <div className="mini-card">
             <span>Gyro Gamma</span>
-            <strong>{telemetry.gamma.toFixed(1)} deg</strong>
-          </article>
-          <article className="glass-card stat-card">
+            <strong>{telemetry.gamma.toFixed(1)}°</strong>
+          </div>
+          <div className="mini-card">
             <span>Motion</span>
             <strong>{telemetry.motion.toFixed(2)} m/s2</strong>
-          </article>
+          </div>
         </section>
 
         {telemetry.sos ? (
@@ -783,6 +754,76 @@ export default function HomePage() {
             <a href={telemetry.lat !== null && telemetry.lng !== null ? `https://www.google.com/maps?q=${telemetry.lat},${telemetry.lng}` : "#"} target="_blank" rel="noreferrer">
               Open location
             </a>
+          </section>
+        ) : null}
+
+        {sosActive || isCalling || callHold ? (
+          <section className="sos-overlay" role="dialog" aria-live="polite">
+            <div className="sos-modal">
+              <div className="sos-header">
+                <span>Emergency Protocol</span>
+                <strong>SOS Detected</strong>
+              </div>
+              <div className="sos-body">
+                {isCalling ? (
+                  <>
+                    <div className="calling-card">
+                      <div className="calling-pfp">EH</div>
+                      <div>
+                        <h3>Calling {emergencyContact.name}</h3>
+                        <p>{emergencyContact.number}</p>
+                      </div>
+                    </div>
+                    <div className="calling-pulse" />
+                    <p>Stay calm. Help is being notified.</p>
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => {
+                        setIsCalling(false);
+                        setCallHold(false);
+                        setSosActive(false);
+                        setSosCountdown(null);
+                      }}
+                    >
+                      End call
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="countdown-ring">
+                      <span>{sosCountdown ?? 10}</span>
+                    </div>
+                    <h3>Confirm this is not an accident</h3>
+                    <p>Auto-call will start in {sosCountdown ?? 10} seconds.</p>
+                    <div className="sos-actions">
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => {
+                          setSosActive(false);
+                          setSosCountdown(null);
+                          setIsCalling(false);
+                          setCallHold(false);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSosCountdown(null);
+                          setIsCalling(true);
+                          setCallHold(true);
+                        }}
+                      >
+                        Call now
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
           </section>
         ) : null}
 
