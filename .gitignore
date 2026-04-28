@@ -1,0 +1,50 @@
+## Node / Next
+node_modules/
+.next/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+## VS Code
+.vscode/
+
+## macOS
+.DS_Store
+
+## Windows
+Thumbs.db
+ehthumbs.db
+
+## Logs
+*.log
+
+## Environment
+.env
+.env.*.local
+
+## Arduino / PlatformIO
+/build/
+/.pio/
+*.elf
+*.bin
+*.hex
+*.eep
+*.map
+*.tmp
+*.o
+*.d
+*.lst
+*.sym
+
+# Arduino sketchbook build folders and local preferences
+*.pioenvs/
+.arduino-
+
+## Python
+__pycache__/
+*.py[cod]
+
+## Misc
+coverage/
