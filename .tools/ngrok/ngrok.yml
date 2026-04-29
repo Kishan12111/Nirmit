@@ -1,0 +1,4 @@
+version: "3"
+agent:
+    web_addr: 127.0.0.1:4040
+    authtoken: 39xvIRPPQlOOKMu9hmBafRcBaWy_72QQM86g9C23bpyeFYpma
