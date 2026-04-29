@@ -585,7 +585,7 @@ export default function HomePage() {
       }
 
       try {
-        const response = await fetch(`http://${espIp}/data`, { cache: "no-store" });
+        const response = await fetch(`/api/receiver?ip=${encodeURIComponent(espIp)}`, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
